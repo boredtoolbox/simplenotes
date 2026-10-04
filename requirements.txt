@@ -1,0 +1,3 @@
+PyQt6
+# Optional: colored syntax highlighting in code blocks (falls back to plain monospace).
+Pygments
