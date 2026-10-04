@@ -40,6 +40,7 @@ rm -rf "$DIST/SimpleNotes"  # the intermediate folder; the .app is self-containe
 STAGE="$BUILD/dmg"
 rm -rf "$STAGE" && mkdir -p "$STAGE"
 cp -R "$DIST/SimpleNotes.app" "$STAGE/"
+cp "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "Simple Notes" -srcfolder "$STAGE" -ov -format UDZO "$DIST/SimpleNotes.dmg" >/dev/null
 

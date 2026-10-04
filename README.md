@@ -68,6 +68,12 @@ path).
   **⌘K** link · **⌘↩** checkbox · **⌘1** show/hide sidebar · **⌘⇧D** dark mode
 - Drag notes and folders in the sidebar to reorder them, or drag a note onto a folder to move it.
 
+## License
+
+Copyright © 2026 boredtoolbox. Simple Notes is free software, licensed under the
+[GNU General Public License v3.0](LICENSE). You may use, modify and share it, including
+commercially, as long as anything you share stays under the same license with its source code.
+
 ## Build from source
 
 Requires Python 3.9+.
