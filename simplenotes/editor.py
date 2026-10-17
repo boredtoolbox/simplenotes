@@ -16,7 +16,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
-    QColor, QFont, QKeyEvent, QPainter, QPainterPath, QPen, QSyntaxHighlighter, QTextBlock,
+    QColor, QFont, QFontMetricsF, QKeyEvent, QPainter, QPainterPath, QPen, QSyntaxHighlighter, QTextBlock,
     QTextBlockFormat, QTextBlockUserData, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat,
 )
 from PyQt6.QtWidgets import QTextEdit
@@ -75,6 +75,8 @@ _CELL_TOKEN_RE = re.compile(
 )
 
 CellRun = Tuple[str, frozenset]  # (text, styles: bold/italic/strike/code/link/image)
+CellLine = List[Tuple[str, frozenset, float]]  # one wrapped line of a cell: (text, styles, width)
+_WRAP_TOKEN_RE = re.compile(r"\s+|\S+")
 
 
 def table_bounds(block: QTextBlock) -> Optional[Tuple[QTextBlock, QTextBlock]]:
@@ -192,6 +194,7 @@ class BlockInfo(QTextBlockUserData):
         self.box: Optional[Tuple[int, int]] = None      # "[ ]" (utf16 start, end)
         self.checked = False
         self.words = 0  # this line's word count; LiveEditor.word_count() sums them
+        self.row_px = 0  # table_row: pixel size of the character that sets the row height
 
 
 def _char_format(color: Optional[str] = None, *, pixel_size: Optional[int] = None,
@@ -235,6 +238,7 @@ class LiveHighlighter(QSyntaxHighlighter):
         self._style = None
         self.f: Dict[str, QTextCharFormat] = {}
         self.f_heading: Dict[int, QTextCharFormat] = {}
+        self._row_formats: Dict[int, QTextCharFormat] = {}
 
     def set_theme(self, t: Theme, fonts: Fonts) -> None:
         mono = fonts.mono
@@ -242,7 +246,6 @@ class LiveHighlighter(QSyntaxHighlighter):
         self.f = {
             "marker": _char_format(t.muted),
             "hidden": self._hidden_format(),
-            "table_row": self._table_row_format(),
             "transparent": _char_format(transparent),
             "bold": _char_format(weight=QFont.Weight.Bold),
             "italic": _char_format(italic=True),
@@ -272,13 +275,15 @@ class LiveHighlighter(QSyntaxHighlighter):
                 self._style = None
         self.rehighlight()
 
-    @staticmethod
-    def _table_row_format() -> QTextCharFormat:
-        """Invisible row text: tall (sets the grid row height) but squeezed so rows never wrap."""
-        fmt = _char_format("#00000000", pixel_size=19)
-        fmt.setFontLetterSpacingType(QFont.SpacingType.AbsoluteSpacing)
-        fmt.setFontLetterSpacing(-7)
-        return fmt
+    def _table_row_format(self, pixel_size: int) -> QTextCharFormat:
+        """Invisible and (nearly) zero-width, but tall: one character in this format sets
+        the height of a grid row, while the rest of the row is hidden so it never wraps."""
+        if pixel_size not in self._row_formats:
+            fmt = _char_format("#00000000", pixel_size=pixel_size)
+            fmt.setFontLetterSpacingType(QFont.SpacingType.PercentageSpacing)
+            fmt.setFontLetterSpacing(0)
+            self._row_formats[pixel_size] = fmt
+        return self._row_formats[pixel_size]
 
     @staticmethod
     def _hidden_format() -> QTextCharFormat:
@@ -378,7 +383,10 @@ class LiveHighlighter(QSyntaxHighlighter):
         if bounds is not None and not reveal:
             is_rule = self.currentBlock() == bounds[0].next()
             info.kind = "table_rule" if is_rule else "table_row"
-            self.setFormat(0, length, self.f["hidden"] if is_rule else self.f["table_row"])
+            self.setFormat(0, length, self.f["hidden"])
+            if not is_rule:
+                info.row_px = editor.table_row_pixel_size(self.currentBlock(), bounds)
+                self.setFormat(0, u(1), self._table_row_format(info.row_px))
             self.setCurrentBlockUserData(info)
             editor.schedule_decorations()
             return
@@ -494,6 +502,9 @@ class LiveEditor(QTextEdit):
         self._active_block = -1
         self._active_table: Optional[Tuple[int, int]] = None  # block numbers of the table being edited
         self._table_hits: List[tuple] = []  # painted grids, for mapping clicks to cells
+        self._table_cache: Dict[tuple, tuple] = {}  # see _table_layout
+        self._row_px_cache: Dict[int, int] = {}
+        self._metrics_cache: Dict[frozenset, QFontMetricsF] = {}
         self._loading = False
         self._side_margin = (-1, -1)  # (left, right) viewport margins
         self._column = -1              # current text width
@@ -514,6 +525,8 @@ class LiveEditor(QTextEdit):
 
         self._decor_timer = QTimer(self, singleShot=True, interval=15)
         self._decor_timer.timeout.connect(self._update_decorations)
+        self._table_timer = QTimer(self, singleShot=True, interval=120)
+        self._table_timer.timeout.connect(self._refresh_table_rows)
         self.highlighter = LiveHighlighter(self)
         self.highlighter.set_theme(theme, fonts)
         self.cursorPositionChanged.connect(self._on_cursor_moved)
@@ -536,6 +549,7 @@ class LiveEditor(QTextEdit):
         self.close_slash()
         self._active_block = -1  # nothing revealed until the user moves the cursor
         self._active_table = None
+        self._table_cache.clear()  # keyed by revision, which a new document starts over
         old = self.document()
         # Documents we created are ours to delete; QTextEdit deletes its own initial one.
         delete_old = old.parent() is self
@@ -660,6 +674,7 @@ class LiveEditor(QTextEdit):
         if column != self._column:
             self._column = column
             self.setLineWrapColumnOrWidth(column)
+            self._table_timer.start()  # wrapped table cells may need more or fewer lines
         spare = self.width() - scrollbar - column
         left = max(8, spare // 2)
         right = max(8, spare - left)
@@ -775,39 +790,21 @@ class LiveEditor(QTextEdit):
         t = self.theme
         layout = self.document().documentLayout()
         offset = self._offset()
-        rows: List[Tuple[QTextBlock, List[Tuple[str, int]]]] = []
-        aligns: List[Qt.AlignmentFlag] = []
-        block = first
-        while block.isValid():
-            if block == first.next():
-                aligns = [cell_alignment(c) for c, _ in split_cells(block.text())]
-            else:
-                rows.append((block, split_cells(block.text())))
-            if block == last:
-                break
-            block = block.next()
-        columns = max(1, len(rows[0][1]))
-
-        pad = 10.0
-        header = frozenset({"bold"})
-        contents = [[cell_runs(cells[c][0], header if r == 0 else frozenset()) if c < len(cells) else []
-                     for c in range(columns)] for r, (_, cells) in enumerate(rows)]
-        widths = [48.0] * columns
-        for row in contents:
-            for c, runs in enumerate(row):
-                text_width = sum(self._run_width(painter, run) for run in runs) + 4  # +4: rounding slack
-                widths[c] = max(widths[c], text_width + 2 * pad)
-        first_rect = layout.blockBoundingRect(first).translated(offset)
-        available = self.viewport().width() - 2 * DOC_MARGIN
-        widths = fit_columns(widths, available)
+        rows = [first] + self._table_blocks(first, last)[2:]  # without the delimiter row
+        aligns, widths, cells, _ = self._table_layout(first, last)
 
         # Each row band runs to the next row's top, so the collapsed delimiter line adds no gap.
-        tops = [layout.blockBoundingRect(b).translated(offset).top() for b, _ in rows]
-        if len(tops) >= 3:  # last row: same height as the row above it
-            tops.append(tops[-1] + tops[-1] - tops[-2])
+        rects = [layout.blockBoundingRect(b).translated(offset) for b in rows]
+        tops = [r.top() for r in rects]
+        if len(tops) >= 3:  # last row: its line height plus spacing, as the next block's top would be
+            fmt = last.blockFormat()
+            factor = 1.0
+            if fmt.lineHeightType() == QTextBlockFormat.LineHeightTypes.ProportionalHeight.value:
+                factor = fmt.lineHeight() / 100
+            tops.append(tops[-1] + rects[-1].height() * factor + fmt.bottomMargin())
         else:
             tops.append(layout.blockBoundingRect(last).translated(offset).bottom() + 4)
-        xs = [first_rect.left()]
+        xs = [rects[0].left()]
         for w in widths:
             xs.append(xs[-1] + w)
         grid = QRectF(xs[0], tops[0], xs[-1] - xs[0], tops[-1] - tops[0])
@@ -825,16 +822,103 @@ class LiveEditor(QTextEdit):
             painter.drawLine(QPointF(grid.left(), y), QPointF(grid.right(), y))
         for x in xs[1:-1]:
             painter.drawLine(QPointF(x, grid.top()), QPointF(x, grid.bottom()))
-        for r, row in enumerate(contents):
-            for c, runs in enumerate(row):
+        pad = self.TABLE_PAD
+        for r, row in enumerate(cells[:len(rows)]):
+            for c, lines in enumerate(row):
                 cell = QRectF(xs[c] + pad, tops[r], xs[c + 1] - xs[c] - 2 * pad, tops[r + 1] - tops[r])
                 align = aligns[c] if c < len(aligns) else Qt.AlignmentFlag.AlignLeft
-                self._draw_runs(painter, runs, cell, align)
+                self._draw_lines(painter, lines, cell, align)
         painter.restore()
         painter.setPen(QPen(QColor(t.border), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(outline)
-        self._table_hits.append((grid, xs, tops, [b for b, _ in rows]))
+        self._table_hits.append((grid, xs, tops, rows))
+
+    # table layout ---------------------------------------------------------
+
+    TABLE_PAD = 10.0  # horizontal padding inside a cell
+    ROW_PX = 19       # pixel size of the row-height character for a one-line row
+
+    @staticmethod
+    def _table_blocks(first: QTextBlock, last: QTextBlock) -> List[QTextBlock]:
+        blocks, block = [], first
+        while block.isValid():
+            blocks.append(block)
+            if block == last:
+                break
+            block = block.next()
+        return blocks
+
+    def _table_width(self) -> float:
+        column = self.lineWrapColumnOrWidth()
+        return float((column if column > 0 else COLUMN_WIDTH) - 2 * DOC_MARGIN)
+
+    def _table_layout(self, first: QTextBlock, last: QTextBlock):
+        """(alignments, column widths, wrapped lines per cell, line count per row) of a
+        table, cached per document revision and column width. Shared by the highlighter,
+        which sizes each row to its line count, and the painter."""
+        key = (first.blockNumber(), last.blockNumber(), first.document().revision(), self._table_width())
+        cached = self._table_cache.get(key)
+        if cached is not None:
+            return cached
+        texts = [b.text() for b in self._table_blocks(first, last)]
+        aligns = [cell_alignment(c) for c, _ in split_cells(texts[1])]
+        rows = [split_cells(text) for i, text in enumerate(texts) if i != 1]
+        columns = max(1, len(rows[0]))
+        pad = self.TABLE_PAD
+        header = frozenset({"bold"})
+        contents = [[cell_runs(cells[c][0], header if r == 0 else frozenset()) if c < len(cells) else []
+                     for c in range(columns)] for r, cells in enumerate(rows)]
+        widths = [48.0] * columns
+        for row in contents:
+            for c, runs in enumerate(row):
+                text_width = sum(self._run_width(run) for run in runs) + 4  # +4: rounding slack
+                widths[c] = max(widths[c], text_width + 2 * pad)
+        widths = fit_columns(widths, self._table_width())
+        cells = [[self._wrap_runs(runs, widths[c] - 2 * pad) for c, runs in enumerate(row)] for row in contents]
+        row_lines = [max([len(lines) for lines in row] + [1]) for row in cells]
+        if len(self._table_cache) > 64:
+            self._table_cache.clear()
+        result = self._table_cache[key] = (aligns, widths, cells, row_lines)
+        return result
+
+    def table_row_pixel_size(self, block: QTextBlock, bounds: Tuple[QTextBlock, QTextBlock]) -> int:
+        """Pixel size of the invisible character that makes this grid row tall enough
+        for its wrapped cells."""
+        index = block.blockNumber() - bounds[0].blockNumber()  # 1 is the delimiter row
+        row_lines = self._table_layout(*bounds)[3]
+        return self._row_pixel_size(row_lines[index - 1 if index > 1 else 0])
+
+    def _row_pixel_size(self, lines: int) -> int:
+        if lines not in self._row_px_cache:
+            def height(px: int) -> float:
+                font = QFont(self.fonts.ui)
+                font.setPixelSize(px)
+                return QFontMetricsF(font).height()
+
+            # Line heights are proportional (150%, see set_markdown), so each extra cell
+            # line needs line_spacing / 1.5 more of the character's height.
+            target = height(self.ROW_PX) + (lines - 1) * self._cell_line_height() / 1.5
+            px = self.ROW_PX
+            while height(px) < target:
+                px += 1
+            self._row_px_cache[lines] = px
+        return self._row_px_cache[lines]
+
+    def _cell_line_height(self) -> float:
+        return QFontMetricsF(self._run_font(frozenset())).lineSpacing()
+
+    def _refresh_table_rows(self) -> None:
+        """Re-highlight grid rows whose height no longer fits (the column width changed)."""
+        block = self.document().begin()
+        while block.isValid():
+            info = block.userData()
+            if isinstance(info, BlockInfo) and info.kind == "table_row":
+                bounds = table_bounds(block)
+                if bounds is not None and self.table_row_pixel_size(block, bounds) != info.row_px:
+                    self.highlighter.rehighlightBlock(block)
+            block = block.next()
+        self.viewport().update()
 
     # cell runs ------------------------------------------------------------
 
@@ -855,36 +939,107 @@ class LiveEditor(QTextEdit):
         font.setUnderline("link" in styles)
         return font
 
-    def _run_width(self, painter: QPainter, run: CellRun) -> float:
-        # Measure with the painter's device so widths match what gets drawn.
-        text, styles = run
-        painter.setFont(self._run_font(styles))
-        extra = 2 * self.CODE_PAD if "code" in styles else 0.0
-        return painter.fontMetrics().horizontalAdvance(text) + extra
+    def _metrics(self, styles: frozenset) -> QFontMetricsF:
+        metrics = self._metrics_cache.get(styles)
+        if metrics is None:
+            # Measure for the viewport so widths match what gets drawn there.
+            metrics = self._metrics_cache[styles] = QFontMetricsF(self._run_font(styles), self.viewport())
+        return metrics
 
-    def _draw_runs(self, painter: QPainter, runs: List[CellRun], cell: QRectF, align: Qt.AlignmentFlag) -> None:
+    def _run_width(self, run: CellRun) -> float:
+        text, styles = run
+        extra = 2 * self.CODE_PAD if "code" in styles else 0.0
+        return self._metrics(styles).horizontalAdvance(text) + extra
+
+    def _wrap_runs(self, runs: List[CellRun], width: float) -> List[CellLine]:
+        """Word-wrap styled runs into lines that fit width. A word wider than the
+        cell is broken between characters."""
+        lines: List[CellLine] = [[]]
+        x = 0.0
+
+        def add(text: str, styles: frozenset) -> None:
+            nonlocal x
+            line = lines[-1]
+            if line and line[-1][1] == styles:
+                merged = line[-1][0] + text
+                line[-1] = (merged, styles, self._run_width((merged, styles)))
+            else:
+                line.append((text, styles, self._run_width((text, styles))))
+            x = sum(w for _, _, w in line)
+
+        def new_line() -> None:
+            nonlocal x
+            line = lines[-1]
+            while line and not line[-1][0].strip():
+                line.pop()
+            if line and line[-1][0] != line[-1][0].rstrip():
+                text, styles, _ = line[-1]
+                line[-1] = (text.rstrip(), styles, self._run_width((text.rstrip(), styles)))
+            lines.append([])
+            x = 0.0
+
+        def extra_for(styles: frozenset) -> float:
+            line = lines[-1]
+            if "code" in styles and not (line and line[-1][1] == styles):
+                return 2 * self.CODE_PAD
+            return 0.0
+
+        for text, styles in runs:
+            metrics = self._metrics(styles)
+            for token in _WRAP_TOKEN_RE.findall(text):
+                if token.isspace():
+                    if lines[-1]:
+                        add(token, styles)
+                    continue
+                needed = metrics.horizontalAdvance(token) + extra_for(styles)
+                if x + needed > width and lines[-1]:
+                    new_line()
+                    needed = metrics.horizontalAdvance(token) + extra_for(styles)
+                while needed > width - x and len(token) > 1:  # too wide even alone: split it
+                    room = width - x - extra_for(styles)
+                    cut = 1
+                    while cut < len(token) and metrics.horizontalAdvance(token[:cut + 1]) <= room:
+                        cut += 1
+                    add(token[:cut], styles)
+                    token = token[cut:]
+                    new_line()
+                    needed = metrics.horizontalAdvance(token) + extra_for(styles)
+                add(token, styles)
+        new_line()
+        lines.pop()
+        return lines or [[]]
+
+    def _draw_lines(self, painter: QPainter, lines: List[CellLine], cell: QRectF,
+                    align: Qt.AlignmentFlag) -> None:
+        """Draw a cell's wrapped lines, vertically centered and aligned in cell."""
+        line_height = self._cell_line_height()
+        top = cell.center().y() - len(lines) * line_height / 2
+        for i, line in enumerate(lines):
+            band = QRectF(cell.left(), top + i * line_height, cell.width(), line_height)
+            self._draw_runs(painter, line, band, align)
+
+    def _draw_runs(self, painter: QPainter, runs: CellLine, cell: QRectF, align: Qt.AlignmentFlag) -> None:
         """Draw styled runs on one line, aligned in cell; cut off with "…" if too long."""
         t = self.theme
-        widths = [self._run_width(painter, run) for run in runs]
-        total = sum(widths)
+        total = sum(width for _, _, width in runs)
         if align & Qt.AlignmentFlag.AlignRight and total <= cell.width():
             x = cell.right() - total
         elif align & Qt.AlignmentFlag.AlignHCenter and total <= cell.width():
             x = cell.left() + (cell.width() - total) / 2
         else:
             x = cell.left()
-        for (text, styles), width in zip(runs, widths):
+        for text, styles, width in runs:
             room = cell.right() - x
             if room <= 4:
                 break
-            font = self._run_font(styles)
-            painter.setFont(font)
+            painter.setFont(self._run_font(styles))
+            metrics = self._metrics(styles)
             extra = 2 * self.CODE_PAD if "code" in styles else 0.0
-            if width > room:  # last visible run: elide it
-                text = painter.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(room - extra))
-                width = painter.fontMetrics().horizontalAdvance(text) + extra
+            if width > room + 0.5:  # doesn't fit (shouldn't happen once wrapped): elide it
+                text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, room - extra)
+                width = metrics.horizontalAdvance(text) + extra
             if "code" in styles:
-                height = painter.fontMetrics().height() + 2
+                height = metrics.height() + 2
                 chip = QRectF(x, cell.center().y() - height / 2, width, height)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(t.code_bg))
@@ -898,7 +1053,7 @@ class LiveEditor(QTextEdit):
             else:
                 color = t.text
             painter.setPen(QColor(color))
-            painter.drawText(QRectF(x + extra / 2, cell.top(), width - extra, cell.height()),
+            painter.drawText(QRectF(x + extra / 2, cell.top(), width - extra + 1, cell.height()),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
             x += width
 
