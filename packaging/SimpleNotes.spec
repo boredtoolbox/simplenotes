@@ -30,11 +30,11 @@ app = BUNDLE(
     name="SimpleNotes.app",
     icon=os.path.join(BUILD, "SimpleNotes.icns"),
     bundle_identifier="local.simplenotes.app",
-    version="1.2.0",
+    version="1.2.1",
     info_plist={
         "CFBundleDisplayName": "Simple Notes",
         "CFBundleName": "Simple Notes",
-        "CFBundleShortVersionString": "1.2.0",
+        "CFBundleShortVersionString": "1.2.1",
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "13.0",  # Qt 6.11's minimum; check QtCore's minos when upgrading
         "NSRequiresAquaSystemAppearance": False,

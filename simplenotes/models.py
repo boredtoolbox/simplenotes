@@ -57,6 +57,9 @@ def preview_snippet(markdown_text: str, length: int = 50) -> str:
     """A plain-text preview of a note: markdown syntax stripped, whitespace collapsed."""
     text = markdown_text or ""
     text = re.sub(r"^\s*(```|~~~).*$", " ", text, flags=re.M)
+    text = re.sub(r"^\s*\|?(\s*:?-+:?\s*\|)+\s*(:?-+:?\s*)?$", " ", text, flags=re.M)  # table rule rows
+    text = re.sub(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$", " ", text, flags=re.M)  # dividers
+    text = re.sub(r"^\s*\|.*$", lambda m: m.group(0).replace("|", " "), text, flags=re.M)  # table cell borders
     text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"^\s*(#{1,6}\s+|>\s?|[-*+]\s+(\[[ xX]\]\s+)?|\d+[.)]\s+)", "", text, flags=re.M)
