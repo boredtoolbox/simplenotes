@@ -10,7 +10,8 @@ from typing import Optional
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
-ICON_NAMES = ("chevron-right", "chevron-down", "chevron-left", "folder", "folder-plus", "note", "pin", "plus", "close")
+ICON_NAMES = ("chevron-right", "chevron-down", "chevron-left", "folder", "folder-plus", "note", "pin", "plus", "close",
+              "compose", "more", "search", "sidebar", "trash", "code")
 
 
 def _path(name: str) -> QPainterPath:
@@ -83,6 +84,52 @@ def _path(name: str) -> QPainterPath:
         p.lineTo(8, 12.75)
         p.moveTo(3.25, 8)
         p.lineTo(12.75, 8)
+    elif name == "compose":
+        p.moveTo(8.5, 2.25)
+        p.lineTo(4, 2.25)
+        p.quadTo(2.25, 2.25, 2.25, 4)
+        p.lineTo(2.25, 12)
+        p.quadTo(2.25, 13.75, 4, 13.75)
+        p.lineTo(12, 13.75)
+        p.quadTo(13.75, 13.75, 13.75, 12)
+        p.lineTo(13.75, 7.5)
+        p.moveTo(6.75, 9.25)
+        p.lineTo(7.25, 7.25)
+        p.lineTo(12.5, 2)
+        p.lineTo(14, 3.5)
+        p.lineTo(8.75, 8.75)
+        p.closeSubpath()
+    elif name == "more":
+        for x in (3.25, 8, 12.75):  # round caps turn each tiny circle into a dot
+            p.addEllipse(QPointF(x, 8), 0.45, 0.45)
+    elif name == "search":
+        p.addEllipse(QPointF(7, 7), 4.5, 4.5)
+        p.moveTo(10.4, 10.4)
+        p.lineTo(13.75, 13.75)
+    elif name == "sidebar":
+        p.addRoundedRect(QRectF(1.75, 2.75, 12.5, 10.5), 2, 2)
+        p.moveTo(6.25, 2.75)
+        p.lineTo(6.25, 13.25)
+    elif name == "trash":
+        p.moveTo(2.75, 4.25)
+        p.lineTo(13.25, 4.25)
+        p.moveTo(6.25, 4.25)
+        p.lineTo(6.25, 2.5)
+        p.lineTo(9.75, 2.5)
+        p.lineTo(9.75, 4.25)
+        p.moveTo(4.25, 4.25)
+        p.lineTo(5, 13.75)
+        p.lineTo(11, 13.75)
+        p.lineTo(11.75, 4.25)
+    elif name == "code":
+        p.moveTo(5, 4.5)
+        p.lineTo(1.75, 8)
+        p.lineTo(5, 11.5)
+        p.moveTo(11, 4.5)
+        p.lineTo(14.25, 8)
+        p.lineTo(11, 11.5)
+        p.moveTo(9.25, 3)
+        p.lineTo(6.75, 13)
     else:
         raise ValueError(f"unknown icon {name!r}")
     return p

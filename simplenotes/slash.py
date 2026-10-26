@@ -87,10 +87,11 @@ class _SlashDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(option.rect).adjusted(4, 1, -4, -1)
-        if option.state & QStyle.StateFlag.State_Selected and command is not None:
+        selected = bool(option.state & QStyle.StateFlag.State_Selected) and command is not None
+        if selected:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(t.selected))
-            painter.drawRoundedRect(rect, 4, 4)
+            painter.setBrush(QColor(t.accent))
+            painter.drawRoundedRect(rect, 6, 6)
         font = QFont(option.font)
         font.setPixelSize(13)
         painter.setFont(font)
@@ -98,13 +99,13 @@ class _SlashDelegate(QStyledItemDelegate):
             painter.setPen(QColor(t.muted))
             painter.drawText(rect.adjusted(10, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter, "No results")
         else:
-            painter.setPen(QColor(t.text))
+            painter.setPen(QColor(t.on_accent if selected else t.text))
             painter.drawText(rect.adjusted(10, 0, -60, 0), Qt.AlignmentFlag.AlignVCenter, command.label)
             if command.hint:
                 mono = QFont(self.popup.mono_family)
                 mono.setPixelSize(12)
                 painter.setFont(mono)
-                painter.setPen(QColor(t.muted))
+                painter.setPen(QColor(t.on_accent if selected else t.muted))
                 painter.drawText(rect.adjusted(0, 0, -10, 0),
                                  Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, command.hint)
         painter.restore()
@@ -137,7 +138,7 @@ class SlashPopup(QFrame):
     def set_theme(self, theme: Theme) -> None:
         self.theme = theme
         self.setStyleSheet(
-            f"#SlashMenu {{ background: {theme.bg}; border: 1px solid {theme.border}; border-radius: 6px; }}"
+            f"#SlashMenu {{ background: {theme.bg}; border: 1px solid {theme.border}; border-radius: 10px; }}"
         )
         self.list.viewport().update()
 

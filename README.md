@@ -52,7 +52,7 @@ Notes are saved automatically as you type, in a single file on your Mac:
 ```
 
 The app also makes a daily backup in the `backups` folder next to it and keeps the last 30.
-Clicking the path in the app's bottom bar shows the file in Finder.
+Clicking the path at the bottom of the sidebar shows the file in Finder.
 
 ## Uninstall
 
@@ -66,7 +66,7 @@ path).
   tables. Keep typing to filter, for example `/h2` or `/todo`.
 - **⌘N** new note · **⌘⇧N** new folder · **⌘F** search · **⌘B / ⌘I** bold / italic ·
   **⌘K** link · **⌘↩** checkbox · **⌘1** show/hide sidebar · **⌘⇧D** dark mode
-- Drag notes and folders in the sidebar to reorder them, or drag a note onto a folder to move it.
+- Drag notes in the note list to reorder them (inside a folder or Notes), drag a note onto a sidebar folder to move it, and drag folders to reorder them.
 
 ## License
 

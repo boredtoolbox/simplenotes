@@ -36,6 +36,8 @@ except ImportError:  # pragma: no cover - depends on environment
 INDENT = "    "
 COLUMN_WIDTH = 760      # max width of the writing column (like a Notion page)
 DOC_MARGIN = 28         # room left of the text for quote bars
+CHECKBOX_SIZE = 18      # the painted to-do circle
+TASK_BOX_WIDTH = 24     # the hidden "[ ]"/"[x]" is padded to this width so the circle fits inside it
 
 FENCE_RE = re.compile(r"^\s*(```|~~~)\s*([\w+#.-]*)")
 HEADING_RE = re.compile(r"^(#{1,6})(\s+)")
@@ -243,6 +245,7 @@ class LiveHighlighter(QSyntaxHighlighter):
     def set_theme(self, t: Theme, fonts: Fonts) -> None:
         mono = fonts.mono
         transparent = "#00000000"
+        self._box_pads: Dict[str, QTextCharFormat] = {}
         self.f = {
             "marker": _char_format(t.muted),
             "hidden": self._hidden_format(),
@@ -250,9 +253,9 @@ class LiveHighlighter(QSyntaxHighlighter):
             "bold": _char_format(weight=QFont.Weight.Bold),
             "italic": _char_format(italic=True),
             "strike": _char_format(t.muted, strike=True),
-            "done": _char_format(t.muted, strike=True),
+            "done": _char_format(t.text),  # like Notes: checked items keep their text
             "code_span": _char_format(t.heading_sub, family=mono, pixel_size=13, background=t.code_bg),
-            "link": _char_format(t.accent, underline=True),
+            "link": _char_format(t.accent_text, underline=True),
             "image": _char_format(t.muted, italic=True),
             "quote": _char_format(t.heading_sub, italic=True),
             "code": _char_format(t.text, family=mono, pixel_size=13),
@@ -294,6 +297,19 @@ class LiveHighlighter(QSyntaxHighlighter):
         return fmt
 
     # ----- helpers -------------------------------------------------------
+
+    def _box_pad(self, box: str) -> QTextCharFormat:
+        """Format for a to-do box's closing "]": letter spacing that makes the whole box
+        TASK_BOX_WIDTH wide, so the circle painted there never covers the revealed "- "
+        before it or the text after it, and "[x]" lines up with the narrower "[ ]"."""
+        fmt = self._box_pads.get(box)
+        if fmt is None:
+            natural = QFontMetricsF(self.editor.document().defaultFont()).horizontalAdvance(box)
+            fmt = QTextCharFormat(self.f["transparent"])
+            fmt.setFontLetterSpacingType(QFont.SpacingType.AbsoluteSpacing)
+            fmt.setFontLetterSpacing(max(0.0, TASK_BOX_WIDTH - natural))
+            self._box_pads[box] = fmt
+        return fmt
 
     def _merge(self, start: int, length: int, fmt: QTextCharFormat) -> None:
         for i in range(start, start + length):
@@ -431,6 +447,7 @@ class LiveHighlighter(QSyntaxHighlighter):
                 info.box = (u(box_start), u(box_start + 3))
                 if not editor.reveal_all:
                     self.setFormat(u(box_start), u(box_start + 3) - u(box_start), self.f["transparent"])
+                    self.setFormat(u(box_start + 2), 1, self._box_pad(text[box_start:box_start + 3]))
                 marker(symbol_start, listing.end(3))
                 if info.checked:
                     self._merge(u(listing.end()), length - u(listing.end()), self.f["done"])
@@ -729,8 +746,8 @@ class LiveEditor(QTextEdit):
         chars = self._char_rect(block, *info.box)
         if chars is None:
             return None
-        size = min(16.0, max(12.0, chars.height() * 0.6))
-        x = chars.left() + max(0.0, (chars.width() - size) / 2)
+        size = CHECKBOX_SIZE
+        x = chars.left() + (chars.width() - size) / 2  # the box is padded to fit it (_box_pad)
         return QRectF(x, chars.center().y() - size / 2, size, size)
 
     def _visible_blocks(self, event):
@@ -1095,14 +1112,14 @@ class LiveEditor(QTextEdit):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(t.text))
                 painter.drawEllipse(chars.center(), 2.6, 2.6)
-        elif info.kind == "task" and info.box:
+        elif info.kind == "task" and info.box and not self.reveal_all:  # raw markdown shows "[ ]" itself
             box = self._box_rect(block, info)
             if box is None:
                 return
             if info.checked:
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(t.accent))
-                painter.drawRoundedRect(box, 3, 3)
+                painter.drawEllipse(box)
                 tick = QPainterPath()
                 tick.moveTo(box.left() + box.width() * 0.24, box.top() + box.height() * 0.53)
                 tick.lineTo(box.left() + box.width() * 0.43, box.top() + box.height() * 0.72)
@@ -1112,9 +1129,9 @@ class LiveEditor(QTextEdit):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPath(tick)
             else:
-                painter.setPen(QPen(QColor(t.muted), 1.4))
+                painter.setPen(QPen(QColor(t.line_number), 1.4))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(box.adjusted(0.7, 0.7, -0.7, -0.7), 3, 3)
+                painter.drawEllipse(box.adjusted(0.7, 0.7, -0.7, -0.7))
 
     # ----- mouse (checkboxes) -------------------------------------------
 

@@ -9,13 +9,14 @@ from typing import List, Optional
 
 from PyQt6.QtCore import QSettings
 from PyQt6.QtGui import QFont, QFontDatabase, QIcon, QPixmap
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication
 
 from . import paths
 from .database import Database, DatabaseAccessError, DatabaseCorruptError, latest_backup
 from .main_window import MainWindow
 from .store import NoteStore
-from .styles import Fonts
+from .styles import Fonts, build_qss, current_theme
+from .widgets import MenuStyler, MessageDialog
 
 MONO_CANDIDATES = ["SF Mono", "Menlo", "JetBrains Mono", "DejaVu Sans Mono", "Ubuntu Mono",
                    "Consolas", "Liberation Mono"]
@@ -38,14 +39,17 @@ def pick_fonts() -> Fonts:
     return Fonts(ui=ui, mono=mono)
 
 
+def _alert(text: str, info: str) -> None:
+    MessageDialog.ask(None, "Simple Notes", text, info, [("ok", "OK", "primary")], default="ok")
+
+
 def open_database() -> Optional[Database]:
     """Open the database, offering recovery from the latest backup if it's damaged."""
     db_file = paths.db_path()
     try:
         return Database(db_file)
     except DatabaseAccessError as exc:
-        QMessageBox.critical(None, "Simple Notes", f"Cannot open the notes database.\n\n{exc}\n\n"
-                             "Check the folder's permissions and try again.")
+        _alert("Cannot open the notes database.", f"{exc}\n\nCheck the folder's permissions and try again.")
         return None
     except DatabaseCorruptError as exc:
         reason = str(exc)
@@ -60,8 +64,10 @@ def open_database() -> Optional[Database]:
     else:
         message = (f"The notes database appears to be damaged ({reason}) and no backup exists.\n\n"
                    f"Start with an empty database? The damaged file will be kept as {quarantined.name}.")
-    answer = QMessageBox.question(None, "Simple Notes", message)
-    if answer != QMessageBox.StandardButton.Yes:
+    answer = MessageDialog.ask(None, "Simple Notes", message, "",
+                               [("no", "Quit", ""), ("yes", "Restore" if backup is not None else "Start Empty",
+                                                     "primary")], default="yes")
+    if answer != "yes":
         return None
     try:
         db_file.replace(quarantined)
@@ -71,7 +77,7 @@ def open_database() -> Optional[Database]:
             shutil.copy2(backup, db_file)
         return Database(db_file)
     except (OSError, DatabaseAccessError, DatabaseCorruptError) as exc:
-        QMessageBox.critical(None, "Simple Notes", f"Recovery failed: {exc}")
+        _alert("Recovery failed.", str(exc))
         return None
 
 
@@ -79,11 +85,14 @@ def run(argv: List[str]) -> int:
     app = QApplication(argv)
     app.setApplicationName("Simple Notes")
     app.setOrganizationName("noteapp")
+    menu_styler = MenuStyler(app)  # rounded corners on every menu, Qt's own context menus included
+    app.installEventFilter(menu_styler)
 
     fonts = pick_fonts()
     ui_font = QFont(fonts.ui)
     ui_font.setPixelSize(13)
     app.setFont(ui_font)
+    app.setStyleSheet(build_qss(current_theme()))  # startup dialogs; the window applies the saved theme
 
     logo = load_icon_pixmap()
     if logo is not None:
@@ -92,8 +101,7 @@ def run(argv: List[str]) -> int:
     try:
         paths.ensure_data_dirs()
     except OSError as exc:
-        QMessageBox.critical(None, "Simple Notes",
-                             f"Cannot create the data folder {paths.data_dir()}:\n\n{exc}")
+        _alert(f"Cannot create the data folder {paths.data_dir()}.", str(exc))
         return 1
 
     db = open_database()
